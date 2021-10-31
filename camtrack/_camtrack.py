@@ -17,7 +17,8 @@ __all__ = [
     'to_camera_center',
     'to_opencv_camera_mat3x3',
     'triangulate_correspondences',
-    'view_mat3x4_to_pose'
+    'view_mat3x4_to_pose',
+    'build_correspondences_corners_cloud'
 ]
 
 from collections import namedtuple
@@ -112,16 +113,15 @@ def _calc_triangulation_angle_mask(view_mat_1: np.ndarray,
     camera_center_2 = to_camera_center(view_mat_2)
     vecs_1 = normalize(camera_center_1 - points3d)
     vecs_2 = normalize(camera_center_2 - points3d)
-    coss_abs = np.abs(np.einsum('ij,ij->i', vecs_1, vecs_2))
-    angles_mask = coss_abs <= np.cos(np.deg2rad(min_angle_deg))
-    return angles_mask, np.median(coss_abs)
+    cos_abs = np.abs(np.einsum('ij,ij->i', vecs_1, vecs_2))
+    angles_mask = cos_abs <= np.cos(np.deg2rad(min_angle_deg))
+    return angles_mask, np.median(cos_abs)
 
 
 Correspondences = namedtuple(
     'Correspondences',
     ('ids', 'points_1', 'points_2')
 )
-
 
 TriangulationParameters = namedtuple(
     'TriangulationParameters',
@@ -253,7 +253,6 @@ def rodrigues_and_translation_to_view_mat3x4(r_vec: np.ndarray,
 
 
 class PointCloudBuilder:
-
     __slots__ = ('_ids', '_points', '_colors')
 
     def __init__(self, ids: np.ndarray = None, points: np.ndarray = None,
@@ -309,6 +308,21 @@ class PointCloudBuilder:
         self._points = self.points[sorting_idx].reshape(-1, 3)
         if self.colors is not None:
             self._colors = self.colors[sorting_idx].reshape(-1, 3)
+
+
+def build_correspondences_corners_cloud(corners: FrameCorners, cloud: PointCloudBuilder,
+                                        ids_to_remove=None) -> Correspondences:
+    ids_1 = corners.ids.flatten()
+    ids_2 = cloud.ids.flatten()
+    _, (indices_1, indices_2) = snp.intersect(ids_1, ids_2, indices=True)
+    corrs = Correspondences(
+        ids_1[indices_1],
+        corners.points[indices_1],
+        cloud.points[indices_2]
+    )
+    if ids_to_remove is not None:
+        corrs = _remove_correspondences_with_ids(corrs, ids_to_remove)
+    return corrs
 
 
 def _to_int_tuple(point):
@@ -382,11 +396,11 @@ def calc_point_cloud_colors(pc_builder: PointCloudBuilder,
                 errors = np.nan_to_num(errors)
 
             consistency_mask = (
-                (errors <= max_reproj_error) &
-                (corners.points[:, 0] >= 0) &
-                (corners.points[:, 1] >= 0) &
-                (corners.points[:, 0] < image.shape[1] - 0.5) &
-                (corners.points[:, 1] < image.shape[0] - 0.5)).flatten()
+                    (errors <= max_reproj_error) &
+                    (corners.points[:, 0] >= 0) &
+                    (corners.points[:, 1] >= 0) &
+                    (corners.points[:, 0] < image.shape[1] - 0.5) &
+                    (corners.points[:, 1] < image.shape[0] - 0.5)).flatten()
             ids_to_process = corners.ids[consistency_mask].flatten()
             corner_points = np.round(
                 corners.points[consistency_mask]
@@ -468,10 +482,10 @@ def create_cli(track_and_calc_colors):
             frame = 0
             while True:
                 grayscale = sequence[frame]
-                bgra = draw_residuals(grayscale, corner_storage[frame],
-                                      point_cloud, camera_parameters,
-                                      poses[frame])
-                cv2.imshow('Frame', bgra)
+                bgr = draw_residuals(grayscale, corner_storage[frame],
+                                     point_cloud, camera_parameters,
+                                     poses[frame])
+                cv2.imshow('Frame', bgr)
                 key = chr(cv2.waitKey(20) & 0xFF)
                 if key == 'r':
                     frame = 0
@@ -481,4 +495,5 @@ def create_cli(track_and_calc_colors):
                     frame += 1
                 if key == 'q':
                     break
+
     return cli

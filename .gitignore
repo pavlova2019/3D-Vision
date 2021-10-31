@@ -15,3 +15,8 @@ pip-delete-this-directory.txt
 data_examples
 dataset
 dataset/*
+
+# Test data
+camtrack/*.pickle
+camtrack/*.yml
+test_results/
