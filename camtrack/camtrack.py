@@ -41,13 +41,16 @@ def count_view_mat(corners: FrameCorners, point_cloud_builder: PointCloudBuilder
     correspondences_corners_cloud = build_correspondences_corners_cloud(corners,
                                                                         point_cloud_builder)
     # Solving PnP
-    _, r_vec, t_vec, inliers = cv2.solvePnPRansac(correspondences_corners_cloud.points_2,
-                                                  correspondences_corners_cloud.points_1, intrinsic_mat, None)
+    while 1:
+        res, r_vec, t_vec, inliers = cv2.solvePnPRansac(correspondences_corners_cloud.points_2,
+                                                        correspondences_corners_cloud.points_1, intrinsic_mat, None)
+        if res != -1:
+            break
     r_vec, t_vec = cv2.solvePnPRefineLM(correspondences_corners_cloud.points_2[inliers],
                                         correspondences_corners_cloud.points_1[inliers], intrinsic_mat, None,
                                         r_vec, t_vec)
-    if inliers is None:
-        inliers = np.empty(1)
+    # if inliers is None:
+    #     inliers = np.empty(1)
     print("Frame", pos, ": calculating camera pos --", inliers.shape[0], "inliers found")
     return rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
 
@@ -77,13 +80,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     point_cloud_builder = PointCloudBuilder()
     triangulate_from_2_pos(corner_storage[left], corner_storage[right],
                            view_mats[left], view_mats[right],
-                           intrinsic_mat, TriangulationParameters(0.5, 0, 0),
+                           intrinsic_mat, TriangulationParameters(1, 0.1, 0.1),
                            left, right, point_cloud_builder)
 
     initial_length = right - left + 1
     switch = 1
     frames_done = 2
-    delta = 9
+    delta = 8
     min_delta = 4
 
     # Filling the middle
@@ -121,7 +124,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         # Adding 3d points
         triangulate_from_2_pos(corner_storage[cur_left], corner_storage[cur_right],
                                view_mats[cur_left], view_mats[cur_right],
-                               intrinsic_mat, TriangulationParameters(0.5, 0, 0),
+                               intrinsic_mat, TriangulationParameters(1, 0.1, 0.1),
                                cur_left, cur_right, point_cloud_builder)
 
         # Counting view_mats in (cur_left, cur_right)
@@ -163,7 +166,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         # Adding 3d points
         triangulate_from_2_pos(corner_storage[cur_left], corner_storage[cur_right],
                                view_mats[cur_left], view_mats[cur_right],
-                               intrinsic_mat, TriangulationParameters(0.5, 0, 0),
+                               intrinsic_mat, TriangulationParameters(1, 0.1, 0.1),
                                cur_left, cur_right, point_cloud_builder)
 
         # Counting view_mats in (cur_left, cur_right)
