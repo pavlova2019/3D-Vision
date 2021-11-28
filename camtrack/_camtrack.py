@@ -18,7 +18,9 @@ __all__ = [
     'to_opencv_camera_mat3x3',
     'triangulate_correspondences',
     'view_mat3x4_to_pose',
-    'build_correspondences_corners_cloud'
+    'build_correspondences_corners_cloud',
+    'calc_m',
+    'to_opencv_camera_mat4x4'
 ]
 
 from collections import namedtuple
@@ -30,6 +32,7 @@ import numpy as np
 import pims
 from sklearn.preprocessing import normalize
 import sortednp as snp
+from scipy.optimize import least_squares
 
 import frameseq
 from corners import CornerStorage, FrameCorners, build, load
@@ -38,6 +41,92 @@ from data3d import (
     read_camera_parameters, read_poses,
     write_point_cloud, write_poses
 )
+
+
+def mat4x4_to_mat3x4(mat4x4):
+    mat = eye3x4()
+    mat[:, :3] = mat4x4[:3, :3]
+    mat[:, 3] = mat4x4[:3, 3]
+    return mat
+
+
+def mat3x4_to_mat4x4(mat3x4):
+    mat = np.eye(4)
+    mat[:3, :3] = mat3x4[:, :3]
+    mat[:3, 3] = mat3x4[:, 3]
+    return mat
+
+
+def mat4x4_to_vec6(mat4x4):
+    return np.hstack((
+        cv2.Rodrigues(mat4x4[:3, :3])[0].flatten(),
+        mat4x4[:3, 3]
+    ))
+
+
+def vec6_to_mat4x4(vec6):
+    mat = np.eye(4)
+    mat[:3, :3] = cv2.Rodrigues(vec6[:3])[0]
+    mat[:3, 3] = vec6[3:]
+    return mat
+
+
+def to_homogeneous(points3d):
+    return np.pad(points3d, ((0, 0), (0, 1)), constant_values=(0, 1.0))
+
+
+def from_homogeneous(points4d):
+    return points4d[:, :3] / points4d[:, 3].reshape(-1, 1)
+
+
+def transform_points3d(points, mat4x4):
+    points4d = to_homogeneous(points)
+    return from_homogeneous((mat4x4 @ points4d.T).T)
+
+
+def project_points3d(points3d, mat4x4):
+    return transform_points3d(points3d, mat4x4)[:, :2]
+
+
+def calc_residuals(vec6, points2d, points3d, proj):
+    view = vec6_to_mat4x4(vec6)
+    projected = project_points3d(points3d, proj @ view)
+    return (projected - points2d).flatten()
+
+
+def calc_m(points2d, points3d, view_mat3x4, proj):
+    mat4x4 = mat3x4_to_mat4x4(view_mat3x4)
+    vec6 = mat4x4_to_vec6(mat4x4)
+    lm_result_outliers = least_squares(
+        fun=calc_residuals,
+        args=(points2d, points3d, proj,),
+        x0=vec6,
+        method='lm'
+    )
+    lm_vec6_outliers = lm_result_outliers.x
+    lm_result_loss = least_squares(
+        fun=calc_residuals,
+        args=(points2d, points3d, proj,),
+        x0=lm_vec6_outliers,
+        loss='soft_l1',
+        method='trf'
+    )
+    lm_vec6_loss = lm_result_loss.x
+    lm_view_loss = vec6_to_mat4x4(lm_vec6_loss)
+    return mat4x4_to_mat3x4(lm_view_loss)
+
+
+def to_opencv_camera_mat4x4(camera_parameters: CameraParameters,
+                            image_height: int) -> np.ndarray:
+    # pylint:disable=invalid-name
+    h = image_height
+    w = h * camera_parameters.aspect_ratio
+    h_to_f = 2.0 * np.tan(camera_parameters.fov_y / 2.0)
+    f = h / h_to_f
+    return np.array([[f, 0.0, w / 2.0, 0.0],
+                     [0.0, f, h / 2.0, 0.0],
+                     [0.0, 0.0, 0.0, 1.0],
+                     [0.0, 0.0, 1.0, 0.0]])
 
 
 def to_opencv_camera_mat3x3(camera_parameters: CameraParameters,
@@ -123,6 +212,11 @@ Correspondences = namedtuple(
     ('ids', 'points_1', 'points_2')
 )
 
+CornersCloudCorrespondences = namedtuple(
+    'Correspondences',
+    ('ids', 'points_corners', 'points_cloud')
+)
+
 TriangulationParameters = namedtuple(
     'TriangulationParameters',
     ('max_reprojection_error', 'min_triangulation_angle_deg', 'min_depth')
@@ -141,6 +235,21 @@ def _remove_correspondences_with_ids(correspondences: Correspondences,
         ids[mask],
         correspondences.points_1[mask],
         correspondences.points_2[mask]
+    )
+
+
+def _remove_corners_cloud_correspondences_with_ids(correspondences: CornersCloudCorrespondences,
+                                     ids_to_remove: np.ndarray) \
+        -> CornersCloudCorrespondences:
+    ids = correspondences.ids.flatten()
+    ids_to_remove = ids_to_remove.flatten()
+    _, (indices_1, _) = snp.intersect(ids, ids_to_remove, indices=True)
+    mask = np.full(ids.shape, True)
+    mask[indices_1] = False
+    return Correspondences(
+        ids[mask],
+        correspondences.points_corners[mask],
+        correspondences.points_cloud[mask]
     )
 
 
@@ -311,17 +420,17 @@ class PointCloudBuilder:
 
 
 def build_correspondences_corners_cloud(corners: FrameCorners, cloud: PointCloudBuilder,
-                                        ids_to_remove=None) -> Correspondences:
+                                        ids_to_remove=None) -> CornersCloudCorrespondences:
     ids_1 = corners.ids.flatten()
     ids_2 = cloud.ids.flatten()
     _, (indices_1, indices_2) = snp.intersect(ids_1, ids_2, indices=True)
-    corrs = Correspondences(
+    corrs = CornersCloudCorrespondences(
         ids_1[indices_1],
         corners.points[indices_1],
         cloud.points[indices_2]
     )
     if ids_to_remove is not None:
-        corrs = _remove_correspondences_with_ids(corrs, ids_to_remove)
+        corrs = _remove_corners_cloud_correspondences_with_ids(corrs, ids_to_remove)
     return corrs
 
 

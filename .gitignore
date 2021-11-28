@@ -20,3 +20,5 @@ dataset/*
 camtrack/*.pickle
 camtrack/*.yml
 test_results/
+docker.zip
+docker/
