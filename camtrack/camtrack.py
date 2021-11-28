@@ -29,7 +29,7 @@ from _camtrack import (
 )
 
 
-MAX_REP_ERROR = 1.5
+MAX_REP_ERROR = 2.5
 
 
 def get_new_points(cor1: FrameCorners, cor2: FrameCorners, mat1, mat2, intrinsic_mat, pos1, pos2,
@@ -93,12 +93,12 @@ def get_positions(cor1: FrameCorners, cor2: FrameCorners, intrinsic_mat):
     h_params = {"method": cv2.RANSAC, "confidence": 0.99, "ransacReprojThreshold": 5.0, "maxIters": 1000}
     _, h_mask = cv2.findHomography(correspondences.points_1, correspondences.points_2, **h_params)
 
-    _, _, cos = triangulate_correspondences(correspondences, eye3x4(),
-                                            pose_to_mat(poses[best_pose]), intrinsic_mat, tr_params)
-
+    _, ids, cos = triangulate_correspondences(correspondences, eye3x4(),
+                                              pose_to_mat(poses[best_pose]), intrinsic_mat, tr_params)
+    inliers_num = ids.shape[0]
     print("+++ ", np.sum(mask)/np.sum(h_mask), cos)
     print(new_points)
-    return pose_to_mat(poses[best_pose]), np.sum(mask)/(np.sum(h_mask)*cos)  # don't change
+    return pose_to_mat(poses[best_pose]), inliers_num/(np.sum(h_mask)*cos)
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
@@ -162,26 +162,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     while frames_done < initial_length:
         # Triangulation setup
         done = False
-        if switch == 1:
-            # Right side
-            switch = -1
-            new_frame = max(mid_right - delta, mid_left)
-            if new_frame - mid_left < min_delta:
-                new_frame = mid_left
-                done = True
-            cur_left = new_frame
-            cur_right = mid_right
-            mid_right = new_frame
-        else:
-            # Left side
-            switch = 1
-            new_frame = min(mid_left + delta, mid_right)
-            if mid_right - new_frame < min_delta:
-                new_frame = mid_right
-                done = True
-            cur_left = mid_left
-            cur_right = new_frame
-            mid_left = new_frame
+        new_frame = max(mid_right - delta, mid_left)
+        if new_frame - mid_left < min_delta:
+            new_frame = mid_left
+            done = True
+        cur_left = new_frame
+        cur_right = mid_right
+        mid_right = new_frame
 
         if not done:
             view_mats[new_frame] = count_view_mat(corner_storage[new_frame], point_cloud_builder,
