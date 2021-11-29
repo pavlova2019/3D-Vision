@@ -20,7 +20,8 @@ __all__ = [
     'view_mat3x4_to_pose',
     'build_correspondences_corners_cloud',
     'calc_m',
-    'to_opencv_camera_mat4x4'
+    'to_opencv_camera_mat4x4',
+    'check_points3d'
 ]
 
 from collections import namedtuple
@@ -97,20 +98,22 @@ def calc_residuals(vec6, points2d, points3d, proj):
 def calc_m(points2d, points3d, view_mat3x4, proj):
     mat4x4 = mat3x4_to_mat4x4(view_mat3x4)
     vec6 = mat4x4_to_vec6(mat4x4)
-    lm_result_outliers = least_squares(
+    '''lm_result_outliers = least_squares(
         fun=calc_residuals,
         args=(points2d, points3d, proj,),
         x0=vec6,
         method='lm'
     )
-    lm_vec6_outliers = lm_result_outliers.x
+    lm_vec6_outliers = lm_result_outliers.x'''
     lm_result_loss = least_squares(
         fun=calc_residuals,
         args=(points2d, points3d, proj,),
-        x0=lm_vec6_outliers,
-        loss='soft_l1',
-        method='trf'
+        x0=vec6,
+        loss='huber',
+        verbose=0
     )
+    '''loss='soft_l1',
+    method='trf' '''
     lm_vec6_loss = lm_result_loss.x
     lm_view_loss = vec6_to_mat4x4(lm_vec6_loss)
     return mat4x4_to_mat3x4(lm_view_loss)
@@ -287,6 +290,15 @@ def _calc_reprojection_error_mask(points3d, points2d_1, points2d_2,
         reproj_errs2.flatten() < max_reprojection_error
     )
     return reproj_err_mask
+
+
+def check_points3d(points3d, points2d_1, points2d_2,
+                   view_mat_1, view_mat_2, intrinsic_mat,
+                   max_reprojection_error):
+    rep_err_mask = _calc_reprojection_error_mask(points3d, points2d_1, points2d_2,
+                                                 view_mat_1, view_mat_2, intrinsic_mat,
+                                                 max_reprojection_error)
+    return rep_err_mask == 0
 
 
 def triangulate_correspondences(correspondences: Correspondences,

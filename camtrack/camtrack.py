@@ -26,12 +26,13 @@ from _camtrack import (
     eye3x4,
     calc_m,
     to_opencv_camera_mat4x4,
-    compute_reprojection_errors
+    compute_reprojection_errors,
+    check_points3d
 )
 
 
-MAX_REP_ERROR = 1.5
-tr_params = TriangulationParameters(MAX_REP_ERROR, 0.5, 3)
+MAX_REP_ERROR = 2
+tr_params = TriangulationParameters(MAX_REP_ERROR, 0.4, 3)
 
 
 def get_new_points(cor1: FrameCorners, cor2: FrameCorners, mat1, mat2, intrinsic_mat, pos1, pos2,
@@ -46,7 +47,6 @@ def get_new_points(cor1: FrameCorners, cor2: FrameCorners, mat1, mat2, intrinsic
 
     points3d, ids, cos = triangulate_correspondences(correspondences, mat1, mat2, intrinsic_mat, tr_params)
     point_cloud_builder.add_points(ids, points3d)
-    point_cloud_builder.update_points(ids, points3d)
     print("Triangulating cloud points for frames:", pos1, pos2)
     print("Current size of the cloud is:", point_cloud_builder.ids.shape[0], ", median cos is:", cos)
     print(np.any(err_mask1), np.any(err_mask2))
@@ -57,7 +57,9 @@ def count_view_mat(corners: FrameCorners, point_cloud_builder: PointCloudBuilder
     correspondences_corners_cloud = build_correspondences_corners_cloud(corners,
                                                                         point_cloud_builder)
     # Solving PnP
-    pnp_params = {"reprojectionError": MAX_REP_ERROR, "confidence": 0.99, "iterationsCount": 1000}
+    pnp_params = {"reprojectionError": MAX_REP_ERROR, "confidence": 0.99, "iterationsCount": 1500}
+    if correspondences_corners_cloud.ids.shape[0] < 5:
+        raise RuntimeError("Not enough points to calculate calculate view_mat")
     res, r_vec, t_vec, inliers = cv2.solvePnPRansac(correspondences_corners_cloud.points_cloud,
                                                     correspondences_corners_cloud.points_corners,
                                                     intrinsic_mat, None, **pnp_params)
@@ -69,7 +71,8 @@ def count_view_mat(corners: FrameCorners, point_cloud_builder: PointCloudBuilder
                                         correspondences_corners_cloud.points_corners[inliers], intrinsic_mat, None,
                                         r_vec, t_vec, criteria)
     view_mat3x4 = rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
-    m_view_mat3x4 = calc_m(correspondences_corners_cloud.points_corners, correspondences_corners_cloud.points_cloud,
+    m_view_mat3x4 = calc_m(correspondences_corners_cloud.points_corners[inliers].reshape(-1, 2),
+                           correspondences_corners_cloud.points_cloud[inliers].reshape(-1, 3),
                            view_mat3x4, proj_mat)
     print(np.any(compute_reprojection_errors(correspondences_corners_cloud.points_cloud,
                                              correspondences_corners_cloud.points_corners,
@@ -87,7 +90,7 @@ def get_positions(cor1: FrameCorners, cor2: FrameCorners, intrinsic_mat):
     if correspondences.ids.shape[0] < 5:
         return eye3x4(), 0, 1
 
-    e_params = {"method": cv2.RANSAC, "prob": 0.99, "threshold": 1.0, "maxIters": 1000}
+    e_params = {"method": cv2.RANSAC, "prob": 0.99, "threshold": 1.0, "maxIters": 1500}
     mat, mask = cv2.findEssentialMat(correspondences.points_1, correspondences.points_2, intrinsic_mat, **e_params)
 
     if not np.any(mask) or mat.shape != (3, 3):
@@ -141,15 +144,17 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         # raise NotImplementedError()
         best = []
         best_cnt = 0
+        best_cos = 1
         st = 5
         for now in range(0, frame_count, st):
             for nxt in range(now + delta + min_delta//2, frame_count, st):
                 print("** ", now, nxt)
 
                 mat, cnt, cos = get_positions(corner_storage[now], corner_storage[nxt], intrinsic_mat)
-                if cnt > best_cnt and cos < 0.9995:
+                if cnt > best_cnt and (cos < 0.9995 or cos < best_cos):
                     print(cnt, cos)
                     best_cnt = cnt
+                    best_cos = cos
                     best = [(now, view_mat3x4_to_pose(eye3x4())), (nxt, view_mat3x4_to_pose(mat))]
         known_view_1 = best[0]
         known_view_2 = best[1]

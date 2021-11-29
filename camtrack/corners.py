@@ -77,7 +77,8 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     image_0 = (frame_sequence[0] * 255.0).astype(np.uint8)
     h, w = image_0.shape
     max_corners = int((h * w) // 4000)
-    feature_params = {'maxCorners': max_corners, 'qualityLevel': 0.2, 'minDistance': 20, 'blockSize': 10}
+    print("\n", max_corners)
+    feature_params = {'maxCorners': max_corners, 'qualityLevel': 0.2, 'minDistance': 16, 'blockSize': 8}
     lk_params = {'winSize': (15, 15), 'maxLevel': 2,
                  'criteria': (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.5)}
     p0 = cv2.goodFeaturesToTrack(image_0, mask=None, **feature_params).reshape((-1, 2))
