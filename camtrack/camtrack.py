@@ -25,21 +25,31 @@ from _camtrack import (
     rodrigues_and_translation_to_view_mat3x4,
     eye3x4,
     calc_m,
-    to_opencv_camera_mat4x4
+    to_opencv_camera_mat4x4,
+    compute_reprojection_errors
 )
 
 
-MAX_REP_ERROR = 2.5
+MAX_REP_ERROR = 1.5
+tr_params = TriangulationParameters(MAX_REP_ERROR, 0.5, 3)
 
 
 def get_new_points(cor1: FrameCorners, cor2: FrameCorners, mat1, mat2, intrinsic_mat, pos1, pos2,
                    point_cloud_builder: PointCloudBuilder):
     correspondences = build_correspondences(cor1, cor2)
-    param = TriangulationParameters(MAX_REP_ERROR, 0.2, 0.2)
-    points3d, ids, cos = triangulate_correspondences(correspondences, mat1, mat2, intrinsic_mat, param)
+
+    corr1 = build_correspondences_corners_cloud(cor1, point_cloud_builder)
+    corr2 = build_correspondences_corners_cloud(cor2, point_cloud_builder)
+
+    err_mask1 = compute_reprojection_errors(corr1.points_cloud, corr1.points_corners, intrinsic_mat @ mat1) > 100.0
+    err_mask2 = compute_reprojection_errors(corr2.points_cloud, corr2.points_corners, intrinsic_mat @ mat2) > 100.0
+
+    points3d, ids, cos = triangulate_correspondences(correspondences, mat1, mat2, intrinsic_mat, tr_params)
     point_cloud_builder.add_points(ids, points3d)
+    point_cloud_builder.update_points(ids, points3d)
     print("Triangulating cloud points for frames:", pos1, pos2)
     print("Current size of the cloud is:", point_cloud_builder.ids.shape[0], ", median cos is:", cos)
+    print(np.any(err_mask1), np.any(err_mask2))
 
 
 def count_view_mat(corners: FrameCorners, point_cloud_builder: PointCloudBuilder, intrinsic_mat, proj_mat, pos):
@@ -61,6 +71,9 @@ def count_view_mat(corners: FrameCorners, point_cloud_builder: PointCloudBuilder
     view_mat3x4 = rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
     m_view_mat3x4 = calc_m(correspondences_corners_cloud.points_corners, correspondences_corners_cloud.points_cloud,
                            view_mat3x4, proj_mat)
+    print(np.any(compute_reprojection_errors(correspondences_corners_cloud.points_cloud,
+                                             correspondences_corners_cloud.points_corners,
+                                             intrinsic_mat @ m_view_mat3x4) > 100.0))
     return m_view_mat3x4
 
 
@@ -70,35 +83,37 @@ def pose_to_mat(pose: Pose):
 
 def get_positions(cor1: FrameCorners, cor2: FrameCorners, intrinsic_mat):
     correspondences = build_correspondences(cor1, cor2)
-    tr_params = TriangulationParameters(MAX_REP_ERROR, 0.2, 0.2)
 
     if correspondences.ids.shape[0] < 5:
-        return eye3x4(), 0
+        return eye3x4(), 0, 1
 
     e_params = {"method": cv2.RANSAC, "prob": 0.99, "threshold": 1.0, "maxIters": 1000}
     mat, mask = cv2.findEssentialMat(correspondences.points_1, correspondences.points_2, intrinsic_mat, **e_params)
 
     if not np.any(mask) or mat.shape != (3, 3):
-        return eye3x4(), 0
+        return eye3x4(), 0, 1
 
     r_mat1, r_mat2, t_vec0 = cv2.decomposeEssentialMat(mat)
-    r_mat_s = [r_mat1, r_mat2]
-    t_vec_s = [t_vec0, -t_vec0]
-    poses = [Pose(r_mat, t_vec) for r_mat in r_mat_s for t_vec in t_vec_s]
-    new_points = [len(triangulate_correspondences(correspondences, eye3x4(),
-                                                  pose_to_mat(pose), intrinsic_mat,
-                                                  tr_params)[1]) for pose in poses]
-    best_pose = np.argmax(new_points)
+
+    best_cos = 1
+    best_pose = Pose(eye3x4(), [[0], [0], [0]])
+    mx_len = 0
+    for r_mat in [r_mat1, r_mat2]:
+        for t_vec in [t_vec0, -t_vec0]:
+            pose = Pose(r_mat, t_vec)
+            _, ids, cos = triangulate_correspondences(correspondences, eye3x4(),
+                                                      pose_to_mat(pose), intrinsic_mat, tr_params)
+            if ids.shape[0] > mx_len:
+                mx_len = ids.shape[0]
+                best_pose = pose
+                best_cos = cos
 
     h_params = {"method": cv2.RANSAC, "confidence": 0.99, "ransacReprojThreshold": 5.0, "maxIters": 1000}
     _, h_mask = cv2.findHomography(correspondences.points_1, correspondences.points_2, **h_params)
 
-    _, ids, cos = triangulate_correspondences(correspondences, eye3x4(),
-                                              pose_to_mat(poses[best_pose]), intrinsic_mat, tr_params)
-    inliers_num = ids.shape[0]
-    print("+++ ", np.sum(mask)/np.sum(h_mask), cos)
-    print(new_points)
-    return pose_to_mat(poses[best_pose]), inliers_num/(np.sum(h_mask)*cos)
+    print("+++ ", mx_len/np.sum(h_mask), best_cos)
+    print(mx_len)
+    return pose_to_mat(best_pose), mx_len/np.sum(h_mask), best_cos
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
@@ -131,9 +146,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
             for nxt in range(now + delta + min_delta//2, frame_count, st):
                 print("** ", now, nxt)
 
-                mat, cnt = get_positions(corner_storage[now], corner_storage[nxt], intrinsic_mat)
-                if cnt > best_cnt:
-                    print(cnt)
+                mat, cnt, cos = get_positions(corner_storage[now], corner_storage[nxt], intrinsic_mat)
+                if cnt > best_cnt and cos < 0.9995:
+                    print(cnt, cos)
                     best_cnt = cnt
                     best = [(now, view_mat3x4_to_pose(eye3x4())), (nxt, view_mat3x4_to_pose(mat))]
         known_view_1 = best[0]
@@ -154,7 +169,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     initial_length = right - left + 1
     switch = 1
-    frames_done = 2
+    '''frames_done = 2
 
     # Filling the middle
     mid_right = right
@@ -184,7 +199,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         for mid_frame in range(cur_left + 1, cur_right):
             view_mats[mid_frame] = count_view_mat(corner_storage[mid_frame], point_cloud_builder,
                                                   intrinsic_mat, proj_mat, mid_frame)
-        frames_done += cur_right - cur_left - 1
+        frames_done += cur_right - cur_left - 1'''
+
+    # Counting view_mats in (left, right)
+    for mid_frame in range(left + 1, right):
+        view_mats[mid_frame] = count_view_mat(corner_storage[mid_frame], point_cloud_builder,
+                                              intrinsic_mat, proj_mat, mid_frame)
+    frames_done = right - left + 1
 
     delta = 8
 
